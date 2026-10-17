@@ -1,0 +1,272 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>用 AI agent 连接券商 API：从只读到下单的安全架构与实战 | 自主投资·AI赋能</title>
+<meta name="description" content="通用技术教学：agent 连接券商 API 的分层架构、三级权限、密钥管理、数据可靠性与人工确认闸门。纸面交易/模拟，非投资建议。">
+<meta property="og:title" content="用 AI agent 连接券商 API：从只读到下单的安全架构与实战">
+<meta property="og:image" content="https://leafblink.github.io/flow_api_architecture.jpg">
+<meta name="twitter:card" content="summary_large_image">
+<style>
+body{margin:0;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:#07152e;color:#e8eef8;line-height:1.85}
+.w{max-width:780px;margin:auto;padding:20px}a{color:#1fb6b0}
+h1{font-size:1.9rem}h2{border-left:4px solid #1fb6b0;padding-left:12px;margin-top:2em}
+img{max-width:100%;border-radius:10px}pre{background:#0e2347;padding:14px;border-radius:10px;overflow:auto}
+code{background:#0e2347;padding:2px 5px;border-radius:4px}pre code{padding:0}
+table{border-collapse:collapse;width:100%}td,th{border:1px solid #1d3560;padding:8px}
+blockquote{border-left:4px solid #f5a623;margin:1em 0;padding:4px 14px;color:#b9c6dc;background:#0e2347}
+nav a{text-decoration:none}hr{border:0;border-top:1px solid #1d3560}
+</style></head><body><div class="w"><nav><a href="index.html">← 自主投资·AI赋能</a></nav>
+<h1>用 AI agent 连接券商 API：从只读到下单的安全架构与实战</h1>
+<blockquote>
+<p>本文是通用技术教学，所有代码均为<strong>示意性伪代码</strong>，不对应任何真实券商，不含任何真实账户、密钥或持仓信息。文中涉及下单的部分，默认均在<strong>纸面交易/模拟账户</strong>中演示。</p>
+</blockquote>
+<p>最近不少朋友问：能不能让 AI agent 直接连上券商 API，帮自己看盘、分析、甚至下单？技术上当然可以，但"能做"和"该怎么做"是两回事。这篇文章不讲某一家券商的具体接口，而是讲一套<strong>通用的安全架构</strong>：数据怎么拿、权限怎么分、密钥怎么管、人在哪个环节必须拍板，以及我在搭建过程中踩过的几个典型坑。</p>
+<hr />
+<h2>一、为什么要让 agent 连 API？它能做什么、不能做什么</h2>
+<p><strong>能做的事：</strong></p>
+<ul>
+<li><strong>省掉重复劳动</strong>：每天开盘前拉一遍行情、持仓、新闻，整理成一页摘要。</li>
+<li><strong>多角度并行分析</strong>：一个 bot 看量价指标，一个看新闻，一个看期权隐含波动率，一个专门挑风险，最后汇总。</li>
+<li><strong>纪律执行</strong>：把你事先写好的规则（比如"单一标的仓位不超过总资产的某个比例"）变成每次都会被检查的硬约束。</li>
+<li><strong>留痕</strong>：每一次数据快照、每一条建议、每一次确认都有时间戳和记录，方便复盘。</li>
+</ul>
+<p><strong>不能（也不应该）做的事：</strong></p>
+<ul>
+<li><strong>替你承担判断责任</strong>。agent 的输出是"建议草稿"，不是指令。</li>
+<li><strong>保证数据正确</strong>。API 会延迟、会断线、会返回旧快照，agent 也会误读。</li>
+<li><strong>凭空补数字</strong>。拿不到数据时，它应该说"拿不到"，而不是"估一个"。</li>
+<li><strong>自己给自己授权下单</strong>。这是本文反复强调的底线。</li>
+</ul>
+<p>一句话：<strong>让 agent 做信息整理和分析的"副驾驶"，方向盘和刹车永远在人手里。</strong></p>
+<hr />
+<h2>二、总体架构</h2>
+<p>核心思路是<strong>读写分离、层层隔离</strong>：读数据的部分权限尽量小，能下单的部分单独隔离，中间必须经过人。</p>
+<p><img alt="安全架构流程图" src="flow_api_architecture.jpg" /></p>
+<p>如果你的平台不支持 mermaid，可以看 ASCII 版：</p>
+<pre><code>[数据层: 只读key, 带时间戳快照]
+        |
+  +-----+------+---------+---------+
+  |            |         |         |
+[Quant]    [News]   [Options]   [Risk]     &lt;- 分析层: 只能读，不能写
+  |            |         |         |
+  +-----+------+---------+---------+
+        |
+ [CIO/Summary Bot]   &lt;- 汇总，不下单
+        |
+ [人工确认闸门]       &lt;- 唯一的授权来源
+        |
+ [执行层: 独立进程/独立key/先模拟]   &lt;- 与上面所有bot物理或逻辑隔离
+</code></pre>
+<p>几个设计要点：</p>
+<ol>
+<li><strong>分析层所有 bot 都拿不到交易权限的密钥</strong>。哪怕某个 bot 被提示词注入、被错误逻辑带偏，它也"物理上"下不了单。</li>
+<li><strong>执行层是独立的</strong>：独立进程、独立配置、独立密钥，只接受带有人工确认记录的订单请求。</li>
+<li><strong>CIO bot 只负责汇总</strong>，它的任务是把分歧和不确定性摆出来，而不是"拍板"。</li>
+</ol>
+<hr />
+<h2>三、权限分级：只读 → 纸面交易 → 实盘</h2>
+<p>建议严格按三个阶段推进，每个阶段<strong>用不同的密钥</strong>：</p>
+<table>
+<thead>
+<tr>
+<th>阶段</th>
+<th>权限</th>
+<th>用途</th>
+<th>密钥</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>阶段 1：只读</td>
+<td>行情、持仓、历史数据查询</td>
+<td>跑通数据流、验证分析逻辑</td>
+<td>只读 key</td>
+</tr>
+<tr>
+<td>阶段 2：纸面交易/模拟</td>
+<td>模拟账户下单</td>
+<td>验证确认流程、订单格式、异常处理</td>
+<td>模拟账户 key</td>
+</tr>
+<tr>
+<td>阶段 3：实盘</td>
+<td>真实下单（建议限额）</td>
+<td>在前两阶段充分稳定后才考虑</td>
+<td>实盘 key，仅执行层持有</td>
+</tr>
+</tbody>
+</table>
+<p><strong>最小权限原则</strong>：</p>
+<ul>
+<li>券商如果支持细分权限（只读/交易/出入金），只勾选当前阶段必需的那一项，<strong>出入金权限永远不要给程序</strong>。</li>
+<li>能设置 IP 白名单、单笔限额、每日限额的，全都设上。</li>
+<li>阶段之间不要"顺手升级"同一把 key 的权限，而是<strong>新建一把</strong>。这样出问题时可以单独吊销，不影响其他环节。</li>
+<li>在模拟阶段停留多久没有标准答案，但至少要覆盖过断线、数据缺失、订单被拒等异常场景。</li>
+</ul>
+<p>为什么要这么麻烦？因为大多数事故都不是"策略错了"，而是"权限给多了"。一个只读 key 泄露，最坏结果是别人看到你的持仓；一个带交易权限的 key 泄露，后果就完全不同了。分阶段、分密钥，本质上是在给每一种可能的错误设置一个"损失上限"。</p>
+<hr />
+<h2>四、密钥管理：永远不要出现在这些地方</h2>
+<p>密钥<strong>绝对不能</strong>出现在：</p>
+<ul>
+<li>和 AI 的聊天对话里（包括"帮我看看这段代码哪里错了"时顺手贴进去）；</li>
+<li>代码文件里（硬编码）；</li>
+<li>截图、录屏、直播画面里；</li>
+<li>git 仓库里（哪怕是私有仓库，哪怕后来删了——历史记录里还有）。</li>
+</ul>
+<p><strong>推荐做法</strong>：环境变量 + <code>.env</code> 文件（本地开发），或者使用云服务商/密码管理器提供的 secret manager（生产环境）。</p>
+<p><code>.env</code> 示例（注意，这里全是占位符）：</p>
+<pre><code class="language-bash"># .env —— 只存在本地，绝不提交
+BROKER_READONLY_KEY=replace_with_your_readonly_key
+BROKER_READONLY_SECRET=replace_with_your_readonly_secret
+BROKER_PAPER_KEY=replace_with_your_paper_key
+BROKER_PAPER_SECRET=replace_with_your_paper_secret
+# 实盘 key 不放在分析环境里，只配置在独立的执行层
+</code></pre>
+<p><code>.gitignore</code> 示例：</p>
+<pre><code class="language-gitignore">.env
+.env.*
+*.key
+secrets/
+logs/
+</code></pre>
+<p>代码里读取：</p>
+<pre><code class="language-python"># 示意代码
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+READONLY_KEY = os.environ.get(&quot;BROKER_READONLY_KEY&quot;)
+if not READONLY_KEY:
+    raise RuntimeError(&quot;缺少只读密钥环境变量，请检查 .env 配置&quot;)
+</code></pre>
+<p>额外两条习惯：<strong>日志里不打印密钥</strong>（打印前做脱敏）；<strong>定期轮换</strong>，一旦怀疑泄露立刻吊销重建。</p>
+<hr />
+<h2>五、实战代码（伪代码）</h2>
+<blockquote>
+<p>⚠️ 以下代码为<strong>示意性伪代码</strong>。<code>broker_client</code>、<code>get_quotes()</code>、<code>get_positions()</code>、<code>place_order()</code> 等均为假想接口，请替换为你所用券商官方 SDK 的对应方法，并以其官方文档为准。</p>
+</blockquote>
+<h3>5.1 只读数据拉取：每条数据都带时间戳</h3>
+<pre><code class="language-python"># 伪代码 / pseudo-code
+from datetime import datetime, timezone
+
+DATA_UNAVAILABLE = &quot;DATA_UNAVAILABLE&quot;
+
+def now_utc():
+    return datetime.now(timezone.utc).isoformat()
+
+def fetch_quote(client, symbol):
+    &quot;&quot;&quot;拉取单个标的行情，失败时返回 DATA_UNAVAILABLE，绝不编造数字&quot;&quot;&quot;
+    try:
+        q = client.get_quotes([symbol])[symbol]   # 假想接口
+        return {
+            &quot;symbol&quot;: symbol,
+            &quot;price&quot;: q.get(&quot;last&quot;),
+            &quot;quote_type&quot;: q.get(&quot;type&quot;),          # 如 realtime / delayed / prev_close
+            &quot;source_time&quot;: q.get(&quot;timestamp&quot;),    # 数据源给的时间
+            &quot;fetched_at&quot;: now_utc(),              # 我们拉取的时间
+        }
+    except Exception as e:
+        return {
+            &quot;symbol&quot;: symbol,
+            &quot;price&quot;: DATA_UNAVAILABLE,
+            &quot;error&quot;: str(e),
+            &quot;fetched_at&quot;: now_utc(),
+        }
+
+def fetch_positions(client):
+    try:
+        return {&quot;positions&quot;: client.get_positions(), &quot;fetched_at&quot;: now_utc()}  # 假想接口
+    except Exception as e:
+        return {&quot;positions&quot;: DATA_UNAVAILABLE, &quot;error&quot;: str(e), &quot;fetched_at&quot;: now_utc()}
+</code></pre>
+<h3>5.2 数据缺失时的兜底：让下游"知道自己不知道"</h3>
+<pre><code class="language-python"># 伪代码
+def summarize_for_bot(quote):
+    if quote[&quot;price&quot;] == DATA_UNAVAILABLE or quote[&quot;price&quot;] is None:
+        return f&quot;{quote['symbol']}: DATA_UNAVAILABLE（{quote['fetched_at']}），本轮不做基于价格的判断&quot;
+    tag = &quot;【延迟行情】&quot; if quote.get(&quot;quote_type&quot;) == &quot;delayed&quot; else &quot;&quot;
+    return f&quot;{quote['symbol']}: {quote['price']} {tag}(源时间 {quote['source_time']})&quot;
+</code></pre>
+<p>同时在给分析 bot 的系统提示里写明：<strong>"遇到 DATA_UNAVAILABLE 时，必须原样报告，禁止估算、禁止用记忆中的价格替代。"</strong></p>
+<h3>5.3 人工确认闸门：下单前必须人来敲字</h3>
+<pre><code class="language-python"># 伪代码 —— 默认在纸面交易/模拟账户运行
+import uuid
+
+MODE = &quot;PAPER&quot;   # PAPER / LIVE，切换到 LIVE 需要单独的配置和密钥
+
+def human_confirm(order):
+    print(&quot;=&quot; * 40)
+    print(f&quot;[{MODE}] 待确认订单（由人复述后确认）&quot;)
+    print(f&quot;  方向: {order['side']}  标的: {order['symbol']}&quot;)
+    print(f&quot;  数量: {order['qty']}  类型: {order['order_type']}&quot;)
+    print(f&quot;  依据数据时间: {order['data_time']}&quot;)
+    print(&quot;=&quot; * 40)
+    code = uuid.uuid4().hex[:6]
+    typed = input(f&quot;请完整输入确认码 {code} 以确认，其他任意输入视为取消：&quot;)
+    return typed.strip() == code
+
+def submit_order(exec_client, order):
+    if order.get(&quot;price_ref&quot;) == DATA_UNAVAILABLE:
+        print(&quot;依据数据缺失，拒绝提交&quot;)
+        return None
+    if not human_confirm(order):
+        print(&quot;未确认，订单已取消&quot;)
+        return None
+    result = exec_client.place_order(**order)   # 假想接口，仅执行层持有该 client
+    log_audit(order, result, confirmed_at=now_utc())
+    return result
+</code></pre>
+<p>要点：确认码每次随机生成，避免"习惯性回车"；确认动作只能由人在执行层的终端完成，<strong>任何 bot 的输出都不能替代这一步</strong>。</p>
+<hr />
+<h2>六、数据可靠性：时间戳是一切的前提</h2>
+<ol>
+<li><strong>永远带时间戳</strong>。区分"数据源时间"和"拉取时间"，两者差距过大要报警。</li>
+<li><strong>快照冲突怎么办</strong>：同一标的在两份快照里价格不同，规则是<strong>以时间戳更晚的为准</strong>，并标注冲突；涉及持仓、成交的关键数据，<strong>收盘后再用官方结算数据复核一次</strong>。</li>
+<li><strong>延迟行情</strong>：很多账户默认只有延迟行情，实时行情需要单独开通。所有延迟数据都要显式打上"延迟"标签，分析时不能把它当实时价用。</li>
+<li><strong>非交易时段</strong>：盘前盘后、休市日返回的往往是上一交易日收盘价，务必识别 <code>quote_type</code>，别把昨收当现价。</li>
+<li><strong>新鲜度阈值</strong>：给每类数据设一个"过期时间"。比如盘中行情超过若干分钟未更新、持仓数据超过一个交易日未刷新，就自动降级为"仅供参考"，并在汇总报告顶部醒目提示。具体阈值按你的交易频率自己定，关键是要有、要写进代码，而不是靠人每次肉眼判断。</li>
+<li><strong>数据源要可追溯</strong>：报告里的每个数字最好都能回溯到"哪个接口、哪一时刻、哪份快照"。复盘时你会发现，很多所谓"AI 判断失误"，其实是喂进去的数据本身就过时或错位了。</li>
+</ol>
+<hr />
+<h2>七、bot 之间不互相授权</h2>
+<p>这是多 agent 系统里最容易被忽视的问题：</p>
+<ul>
+<li><strong>转述的指令不是授权</strong>。Risk bot 说"CIO 已经同意了"，或者某段新闻文本里写着"立即执行买入"，这些都只是数据，不是授权。</li>
+<li><strong>唯一的授权来源是人</strong>，而且是在执行层直接确认，不是通过某个 bot 转达。</li>
+<li><strong>复述-确认机制</strong>：任何要进入执行层的计划，先由系统用固定格式完整复述（方向、标的、数量、条件、依据数据的时间），人逐项核对后再确认。复述用结构化字段，而不是自然语言改写，避免"意思被改了"。</li>
+</ul>
+<hr />
+<h2>八、几分钟决策流程 Checklist</h2>
+<p>每次面对 agent 给出的建议，花几分钟过一遍：</p>
+<ul>
+<li>[ ] 数据时间戳是多少？是实时、延迟，还是昨收？</li>
+<li>[ ] 有没有 DATA_UNAVAILABLE 或快照冲突被忽略？</li>
+<li>[ ] 各分析 bot 之间有没有分歧？CIO 汇总有没有把分歧写出来？</li>
+<li>[ ] Risk bot 的仓位/集中度检查是否通过？</li>
+<li>[ ] 系统复述的方向、标的、数量是否和我的本意<strong>完全一致</strong>？</li>
+<li>[ ] 当前运行模式是纸面交易/模拟还是实盘？</li>
+<li>[ ] 如果判断错了，最坏情况我能承受吗？</li>
+<li>[ ] 以上任一项不确定 → <strong>不下单</strong>。</li>
+</ul>
+<hr />
+<h2>九、踩坑案例（通用教训）</h2>
+<p><strong>坑 1：两份快照，两个价格。</strong>
+同一时间段拉到的两份数据，价格对不上。排查后发现一份是上一交易日收盘价，另一份是盘中实时价。教训：每条数据必须带 <code>quote_type</code> 和源时间戳，冲突时以更晚的时间戳为准，并在报告里显式标出冲突，收盘后再复核。</p>
+<p><strong>坑 2：bot 转述时把计划意思说反了。</strong>
+一个汇总 bot 在转述上游计划时，把"条件满足才执行"改写成了类似"除非条件满足否则执行"的表达，语义恰好反过来。好在有人工复述确认环节被拦了下来。教训：跨 bot 传递计划用结构化字段（JSON），不要让模型反复用自然语言改写；关键条件由人逐项核对。</p>
+<p><strong>坑 3：行情权限被另一台设备占用。</strong>
+有些券商的实时行情权限同一时间只允许一个终端/会话使用。手机 App 开着时，程序端拿到的突然变成了延迟数据或直接报错。教训：程序要能识别行情类型降级并报警，降级时自动标注"延迟"或返回 DATA_UNAVAILABLE，而不是悄悄用延迟价继续分析。</p>
+<hr />
+<h2>十、风险提示与小结</h2>
+<p><strong>风险提示：</strong></p>
+<ul>
+<li>程序化交易存在技术故障、网络中断、数据错误、接口变更等风险，可能导致非预期的订单或损失。</li>
+<li>AI 模型可能产生错误或"幻觉"，其输出不能作为投资决策的唯一依据。</li>
+<li>期权等衍生品杠杆高，可能损失全部权利金甚至更多。</li>
+<li>纸面交易/模拟环境的成交、滑点与实盘不同，模拟结果不代表实盘表现。</li>
+<li>请遵守所在地区法律法规及券商关于 API 使用的条款。</li>
+</ul>
+<p><strong>小结：</strong></p>
+<p>让 AI agent 连券商 API，真正的难点不在写代码，而在<strong>边界设计</strong>：数据层只读、分析层无交易权、执行层独立隔离；权限从只读到模拟再到实盘逐级推进，每级独立密钥；密钥只放环境变量或 secret manager；拿不到数据就说 DATA_UNAVAILABLE；bot 之间不互相授权，人是唯一的授权来源。</p>
+<p><strong>下期预告</strong>：我们会聊聊如何给 Risk bot 设计一套可配置的规则引擎——仓位上限、集中度、单日最大操作次数这些"硬约束"怎么写成代码，以及如何在纸面交易环境里做异常场景演练。</p>
+<hr />
+<p><em>非投资建议；期权可能全损；模拟/过往表现不代表未来。</em></p>
+<hr><p><a href="index.html">返回首页</a> · <a href="https://x.com/Lonelywalker8">X @Lonelywalker8</a></p></div></body></html>
