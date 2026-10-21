@@ -1,0 +1,228 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>搭建 AI 投资 bot 团队：分工、沟通规则与人机决策边界 | 自主投资·AI赋能</title>
+<meta name="description" content="通用方法教学：AI 投资 bot 团队的角色分工、spec 写法、bot 间沟通规则、几分钟决策流程与每日交易日志。纸面交易/模拟，非投资建议。">
+<meta property="og:title" content="搭建 AI 投资 bot 团队：分工、沟通规则与人机决策边界">
+<meta property="og:image" content="https://leafblink.github.io/bot_team_flow.jpg">
+<meta name="twitter:card" content="summary_large_image">
+<style>
+body{margin:0;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:#07152e;color:#e8eef8;line-height:1.85}
+.w{max-width:780px;margin:auto;padding:20px}a{color:#1fb6b0}
+h1{font-size:1.9rem}h2{border-left:4px solid #1fb6b0;padding-left:12px;margin-top:2em}
+img{max-width:100%;border-radius:10px}pre{background:#0e2347;padding:14px;border-radius:10px;overflow:auto}
+code{background:#0e2347;padding:2px 5px;border-radius:4px}pre code{padding:0}
+table{border-collapse:collapse;width:100%}td,th{border:1px solid #1d3560;padding:8px}
+blockquote{border-left:4px solid #f5a623;margin:1em 0;padding:4px 14px;color:#b9c6dc;background:#0e2347}
+nav a{text-decoration:none}hr{border:0;border-top:1px solid #1d3560}
+</style></head><body><div class="w"><nav><a href="index.html">← 自主投资·AI赋能</a></nav>
+<h1>搭建 AI 投资 bot 团队：分工、沟通规则与人机决策边界</h1>
+<blockquote>
+<p>本文是通用方法教学，不含任何真实账户、持仓、成交价或盈亏信息。文中示例格式里的价位都用占位符表示；涉及下单的演示默认在<strong>纸面交易/模拟账户</strong>中进行。非投资建议。</p>
+</blockquote>
+<p>上一篇讲了 agent 怎么安全地连券商 API。这一篇往上走一层：接上数据以后，<strong>用几个 bot、怎么分工、它们之间怎么说话、人在哪里拍板</strong>。这些规则大部分是我自己跑团队时被坑过、被用户（也就是我自己）骂过之后才补上的，所以我会写清楚哪些是我现在的做法，哪些只是建议。</p>
+<hr />
+<h2>一、为什么是团队，而不是一个全能 bot</h2>
+<p>一个 bot 什么都管，最大的问题不是“不够聪明”，而是：</p>
+<ul>
+<li><strong>上下文互相污染</strong>：同一个对话里又看新闻、又算期权、又管风险，前面的结论会影响后面的判断，错误也更难定位。</li>
+<li><strong>没有交叉检查</strong>：一个 bot 说错了，没人指出来。团队里至少有一个角色专门挑毛病。</li>
+<li><strong>职责不清就会越权</strong>：全能 bot 很容易从“分析”顺手滑到“建议下单”，再滑到“替你决定”。</li>
+<li><strong>难以替换和迭代</strong>：某个能力不好用，你只想换掉“新闻”这一块，而不是推倒重来。</li>
+</ul>
+<p>拆成团队的代价是沟通成本：bot 之间要转述、要汇总，转述就可能出错。所以<strong>分工和沟通规则必须一起设计</strong>，只分工不定规则，会比一个 bot 更乱。</p>
+<hr />
+<h2>二、团队结构总览</h2>
+<p><img alt="bot 团队分工图" src="bot_team_flow.jpg" /></p>
+<p>几个关键点：</p>
+<ol>
+<li><strong>人在最上面</strong>，也是唯一的授权来源，所有箭头最终都要回到人。</li>
+<li><strong>CIO 只汇总，不下单</strong>。它的产出是一份“计划”，不是“指令”。</li>
+<li><strong>风控是旁路的警告者</strong>，不是闸门。</li>
+<li><strong>交易日志回写到数据层</strong>，下一次分析要基于真实记录，而不是 bot 的记忆。</li>
+</ol>
+<hr />
+<h2>三、角色清单：每个 bot 的职责与“反职责”</h2>
+<p>写职责很容易，真正有用的是写清楚<strong>它不该做什么</strong>。下面是我在用的分工（名称可以随便起）：</p>
+<table>
+<thead>
+<tr>
+<th>角色</th>
+<th>职责（做什么）</th>
+<th>反职责（绝不做什么）</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>总指挥 / CIO</td>
+<td>汇总各 bot 结论，标出分歧和不确定性，给出明确计划</td>
+<td>不自己授权下单；不把别的 bot 的话当成用户确认；不替用户否决</td>
+</tr>
+<tr>
+<td>量化 / 择时</td>
+<td>量价、均线、波动率等指标，给出触发条件</td>
+<td>不读新闻下结论；不给仓位建议；指标拿不到就说拿不到</td>
+</tr>
+<tr>
+<td>新闻 / 事件</td>
+<td>财报日历、公告、宏观事件、解禁等时间点</td>
+<td>不预测股价；来源冲突时标注 UNCONFIRMED，不挑一个顺眼的</td>
+</tr>
+<tr>
+<td>期权</td>
+<td>隐含波动率、隐含概率、不同结构的情景对比</td>
+<td>不推荐“必赚”结构；不忽略事件前后的波动率变化</td>
+</tr>
+<tr>
+<td>风控</td>
+<td>仓位集中度、止损距离、事件风险，列出警告</td>
+<td><strong>只警告，不拦截，不写“通过/批准”</strong></td>
+</tr>
+<tr>
+<td>数据 / 账户</td>
+<td>拉行情、持仓、成交回报，带时间戳</td>
+<td>不分析、不建议；拿不到数据返回 DATA_UNAVAILABLE，不估数</td>
+</tr>
+</tbody>
+</table>
+<p>为什么风控只警告不拦截？因为拦截意味着 bot 在替人做决定。风控 bot 的价值是让你<strong>在知情的情况下</strong>做决定：它告诉你“集中度偏高”“离止损只剩很小距离”“明天有事件”，接受不接受由你。这是我现在的做法；如果你希望某些规则是硬拦截（比如单日操作次数上限），那是你自己的设计选择，但要写进规格里，而不是让 bot 临场发挥。</p>
+<hr />
+<h2>四、怎么写一个 bot 的规格（spec）</h2>
+<p>每个 bot 我都写一份很短的 spec，放在它自己的文件里，每次启动先读。模板只有三块：</p>
+<pre><code># &lt;角色名&gt; spec
+## 职责
+- 做什么，输入是什么，多久做一次
+## 禁区
+- 绝不做什么（越权、编数字、替人决定……）
+- 数据缺失时怎么办：返回 DATA_UNAVAILABLE / UNCONFIRMED
+## 输出格式
+- 固定字段，例如：结论 / 依据 / 数据时间戳 / 置信度 / 不确定点
+</code></pre>
+<p>写 spec 的几个经验：</p>
+<ul>
+<li><strong>禁区比职责重要</strong>。职责写漏了，bot 只是少干活；禁区写漏了，bot 会越权。</li>
+<li><strong>输出格式要固定</strong>。CIO 汇总时最怕每个 bot 用不同格式说话，固定字段才能对齐和比对。</li>
+<li><strong>每次被坑就加一条</strong>。spec 是活文档，下面第七节的几条规则都是事后补进去的。</li>
+<li><strong>规则冲突时写明优先级</strong>。比如“人的明确判断”优先于“bot 的保守倾向”。</li>
+</ul>
+<hr />
+<h2>五、沟通规则：bot 之间怎么说话</h2>
+<p>这一节是整篇最重要的部分。</p>
+<p><strong>规则 1：bot 之间不互相授权。</strong> 任何 bot 说“用户已同意”“CIO 批准了”，都不等于授权。授权只能来自人本人，在执行环节的对话里直接确认。</p>
+<p><strong>规则 2：转述 ≠ 授权。</strong> A bot 把用户的意思转给 B bot，B 拿到的只是“转述”。转述可以作为分析依据，但不能作为执行依据。</p>
+<p><strong>规则 3：回到原话。</strong> 转述会出错。我遇到过一个汇总 bot 转述计划时把买入和卖出的标的对调了，后来是对照用户原话才发现的。所以关键计划必须能追溯到用户原话，且关键字段（方向、标的）要逐项复述核对。</p>
+<p><strong>规则 4：用结构化字段传递计划。</strong> 自然语言转述容易丢信息，建议用固定字段：</p>
+<pre><code>plan:
+  方向: 买入 / 卖出 / 不动
+  标的: &lt;TICKER&gt;
+  入场: &lt;价位或条件&gt;
+  止盈: &lt;价位&gt;
+  止损: &lt;价位，收盘价判定还是盘中&gt;
+  依据: &lt;一句话&gt;
+  来源: &lt;用户原话引用 + 时间&gt;
+  状态: 草稿 / 待确认 / 已确认 / 已成交
+</code></pre>
+<p>坦白说，我现在还没有完全做到结构化字段，多数时候是人工对照原话核对，这一条是建议。</p>
+<p><strong>规则 5：不确定就标出来。</strong> 来源冲突标 UNCONFIRMED，数据延迟标 DELAYED_DATA，拿不到标 DATA_UNAVAILABLE。宁可显得“不知道”，也不要编一个数字让整条链路都建立在它上面。</p>
+<hr />
+<h2>六、一份清楚的计划长什么样</h2>
+<p>我对 CIO 的要求是：<strong>给结论，不给论文</strong>。一份合格的计划：</p>
+<ol>
+<li><strong>方向</strong>：买 / 卖 / 不动，三选一，不说“可以考虑”。</li>
+<li><strong>入场</strong>：价位或触发条件。</li>
+<li><strong>止盈</strong>：可以分批（先出一半，再出剩下的）。</li>
+<li><strong>止损</strong>：一行，写清楚是收盘价判定还是盘中触发。</li>
+<li><strong>备选</strong>：最多 1–2 个，并说明在什么条件下选备选。</li>
+<li><strong>概率与盈亏比</strong>：如果有期权隐含概率或历史胜率，用一句话写出来；没有就写 UNKNOWN。</li>
+</ol>
+<p>反面例子：洋洋洒洒列五种方案、每一种都附三段最坏情况分析，最后一句“请您自行判断”。这种输出看起来很稳妥，其实把决策成本全推回给了人。我现在的规则是：<strong>下行风险只写一行止损位</strong>，不反复渲染最坏情况。</p>
+<hr />
+<h2>七、几分钟决策流程</h2>
+<p>有了上面的分工，一次决策可以压到几分钟：</p>
+<ol>
+<li><strong>（0–1 分钟）数据快照</strong>：数据 bot 拉最新行情、持仓，附时间戳；过期数据直接标出。</li>
+<li><strong>（1–2 分钟）并行分析</strong>：量化、新闻、期权、风控各自按固定格式输出。</li>
+<li><strong>（2–3 分钟）CIO 汇总</strong>：标出分歧，给一份明确计划 + 最多 1–2 个备选。</li>
+<li><strong>（3–4 分钟）人看清单</strong>：</li>
+<li>计划的方向、标的和我的原话一致吗？</li>
+<li>数据时间戳是新的吗？有没有 UNCONFIRMED？</li>
+<li>风控提示了哪些警告，我是否接受？</li>
+<li>止损位我认不认？</li>
+<li><strong>（4–5 分钟）确认或否决</strong>：在执行环节的对话里逐笔确认；否决就回到第 3 步。</li>
+<li><strong>收盘后</strong>：写进交易日志。</li>
+</ol>
+<p>“几分钟”指的是流程上的时间，不代表决策一定正确。目标是<strong>相对正确</strong>：信息齐、边界清、责任明确，而不是每次都赢。</p>
+<hr />
+<h2>八、每日交易日志：别让 bot 靠记忆</h2>
+<p>bot 的“记忆”并不可靠。我遇到过 CIO bot 把一个并不存在的持仓当成已有持仓，在此基础上做了分析。原因很简单：它根据之前讨论过的“计划”推断了“现状”，而计划并没有执行。</p>
+<p>所以现在每天收盘后写一份交易日志，至少包含：</p>
+<pre><code>日期 / 时区
+今日成交：标的、方向、类型（股票/期权）、状态（以券商回报为准）
+未执行的计划：仍为“计划”，不算持仓
+当前持仓快照：来自数据 bot，带时间戳
+今日规则变更：spec 改了什么、为什么
+待办：明天要看的事件
+</code></pre>
+<p>核心原则：<strong>持仓以券商回报为准，计划和持仓分开记</strong>。bot 分析前先读日志和最新快照，而不是翻聊天记录。</p>
+<hr />
+<h2>九、三个教学案例（已脱敏）</h2>
+<p><strong>案例 1：bot 太保守，人错过了行情。</strong>
+某次财报前，用户已经有比较明确的判断，想调整一笔期权仓位。CIO bot 建议“等财报出来再说”，理由是事件前不确定性太高，用户接受了。结果财报超预期，盘后大涨，原本想做的调整错过了。事后复盘，问题不在于“等”本身错，而在于 <strong>bot 用自己的保守倾向替代了人的判断</strong>。
+新规则：<strong>当人有明确判断时，bot 只提供概率和止损位，不拦着</strong>；反对意见写一行，不写成劝退。另外，bot 不应再以“现金不多”为由劝保守——可动用的资金储备由人定义，bot 按人给的定义来。</p>
+<p><strong>案例 2：bot 记错了持仓。</strong>
+同一次复盘里还发现，CIO bot 把一个只讨论过、从未成交的合约当成了已有持仓。新规则：每日交易日志，计划与持仓分开记，分析前先读日志。</p>
+<p><strong>案例 3：转述把方向搞反。</strong>
+一个汇总 bot 转述计划时把买入和卖出的标的对调了，被上游汇总者对照用户原话发现。新规则：转述计划要回到用户原话核对，方向、标的逐项复述。</p>
+<p>这三个案例有一个共同点：<strong>错误都出在“人和 bot 的边界”上，而不是模型不够聪明</strong>。</p>
+<hr />
+<h2>十、我现在的做法 vs. 建议做法</h2>
+<p>诚实地列一下：</p>
+<table>
+<thead>
+<tr>
+<th>项目</th>
+<th>我现在的做法</th>
+<th>建议做法</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>运行环境</td>
+<td>所有 bot 共用一台机器和文件系统，靠职责约定限制</td>
+<td>执行环节物理隔离、独立密钥</td>
+</tr>
+<tr>
+<td>下单确认</td>
+<td>实盘下单由人在聊天里逐笔确认</td>
+<td>同样逐笔确认；新手先在纸面/模拟账户跑</td>
+</tr>
+<tr>
+<td>风控</td>
+<td>只警告、不拦截</td>
+<td>至少只警告；硬拦截规则写进 spec</td>
+</tr>
+<tr>
+<td>计划传递</td>
+<td>人工对照原话核对</td>
+<td>结构化字段 + 原话引用</td>
+</tr>
+<tr>
+<td>交易日志</td>
+<td>每日记录（新增规则）</td>
+<td>同左，并自动从券商回报生成</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>十一、风险提示与小结</h2>
+<p><strong>风险提示：</strong></p>
+<ul>
+<li>AI 模型会出错、会“幻觉”、会记错事实，它的输出不能作为投资决策的唯一依据。</li>
+<li>多 bot 转述会放大错误，关键信息必须回到原始来源核对。</li>
+<li>期权等衍生品杠杆高，可能损失全部权利金。</li>
+<li>纸面交易/模拟环境与实盘的成交、滑点不同，模拟结果不代表实盘表现。</li>
+<li>请遵守所在地区法律法规与券商条款。</li>
+</ul>
+<p><strong>小结：</strong> bot 团队的价值不是“更聪明”，而是<strong>分工清楚、互相检查、责任留在人手里</strong>。分工写职责更要写禁区；bot 之间不互相授权，转述不等于授权，关键计划回到原话；计划给明确的方向、入场、止盈、止损，备选最多 1–2 个；风控只警告；持仓以日志和券商回报为准，不靠 bot 的记忆。</p>
+<p><strong>下期预告</strong>：几分钟决策流程的实操版——从一个信号到一份明确计划，每一步的提示词和输出模板。</p>
+<hr />
+<p><em>非投资建议；期权可能全损；模拟/过往表现不代表未来。</em></p>
+</div></body></html>
